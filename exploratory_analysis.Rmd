@@ -1,0 +1,198 @@
+---
+title: "Exploratory Analysis"
+author: "TCrow"
+date: "18/09/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## libraries
+```{r libraries}
+library(data.table); library(dplyr); library(ggplot2); library(lubridate); library(zoo); library(stringr); library(tidyr)
+```
+
+```{r clear_enviroment}
+rm(list = ls())
+rm(list=setdiff(ls(), "earningsRaw"))
+rm(list = setdiff(ls(), "filesName"))
+```
+
+## Read in data
+```{r readData, echo=FALSE}
+filesName <- list.files(recursive = TRUE)
+earningsRaw <- fread(filesName[3])
+summaryRaw <- fread(filesName[1])
+pricesRaw <- fread(filesName[4])
+```
+
+```{r S&PConstituents}
+setwd("..")
+path <- "sp500/sp500.csv"
+path2 <- "sp500/S&P_500_Historical_Components_&_Changes(08-23-2020).csv"
+spx500Constituents <- fread(path)
+spx500Constituents <- rename(spx500Constituents, symbol = Symbol)
+spx500ConstituentsHistorical <- fread(path2)
+spx500ConstituentsHistorical$ticker <- str_split(spx500ConstituentsHistorical$ticker, ",")
+#test <- separate(test, tickers, into = paste0("v", 1:507), sep = ",")
+```
+## Clean data
+```{r summary_cleaning}
+summaryRaw
+summaryClean <- summaryRaw %>%
+    filter(total_earnings > 0)
+stockSymbols <- summaryClean$symbol
+```
+
+```{r earnings_cleaning}
+earningsClean <- earningsRaw %>%
+  na.exclude(eps_est, eps) %>%
+  mutate(qtr = as.yearmon(qtr, format = "%m/%Y"),
+         date = ymd(date),
+         eps_est = as.numeric(eps_est),
+         eps = as.numeric(eps),
+         eps_beat = eps - eps_est > 0)
+head(earningsClean)
+sample_n(earningsClean, 20)
+summary(earningsClean[,c("eps_est", "eps")])
+```
+
+```{r earnings_of_s&p}
+earningsClean <- earningsClean %>%
+  inner_join(spx500Constituents, by = "symbol") %>%
+  na.exclude(eps_est, eps)
+length(unique(earningsClean$symbol))
+```
+
+```{r prices_cleaning}
+stockSymbols <- unique(earningsClean$symbol)
+setkey(pricesRaw, symbol)
+pricesClean <- pricesRaw[stockSymbols]
+pricesClean <- pricesClean %>%
+    mutate(date = ymd(date))
+```
+
+```{r remove_unneeded_variables}
+rm(list=setdiff(ls(), c("earningsClean", "summaryClean", "pricesClean")))
+```
+
+## Exploratory analysis
+```{r graphing_EPS}
+#eps differences over time (real earnings minus earnings estimate)
+earningsClean %>%
+    ggplot(aes(date, eps - eps_est)) + 
+    geom_point()
+#eps over time
+earningsClean %>%
+    ggplot(aes(date, eps)) +
+    geom_point()
+#eps beats vs eps misses by year
+ggplot(earningsClean, aes(eps_beat, fill = eps_beat)) +
+  geom_bar() +
+  facet_grid(~floor_date(date, unit = "year"))
+#eps plotted against eps estimates
+ggplot(earningsClean, aes(eps, eps_est, col = floor_date(date, unit = "year"))) +
+  geom_point()
+```
+
+## Price performance around earnings
+```{r merge_prices_and_earnings}
+earningsClean <- data.table(earningsClean)
+pricesWithEarnings <- merge.data.table(pricesClean, earningsClean[,.(symbol, date, qtr)], by = c("symbol", "date"), all.x = TRUE)
+summary(pricesWithEarnings)
+```
+
+```{r only_prices_around_earnings}
+#the two days before and the two days after
+idx <- -2:2
+pricesWithEarnings <- data.table(pricesWithEarnings)
+pricesWithEarnings <- pricesWithEarnings[order(symbol,date)]
+earningsPricesOnly <- pricesWithEarnings[pricesWithEarnings[, .I[{
+    x <- rep(which(!is.na(qtr)), each=length(idx)) + idx 
+    x[x>0 & x<=.N]
+  }], by = symbol]$V1]
+summary(earningsPricesOnly$split_coefficient)
+```
+
+```{r performance_around_earnings}
+earningsPricesOnly <-  earningsPricesOnly %>%
+  group_by(symbol) %>%
+  mutate(earnings_identifier = ifelse(lag(!is.na(qtr), 2), lag(qtr,2),
+                                      ifelse(lag(!is.na(qtr), 1), lag(qtr, 1),
+                                             ifelse(lead(!is.na(qtr), 1), lead(qtr,1),
+                                                    ifelse(lead(!is.na(qtr), 2), lead(qtr,2), qtr))))) %>%
+  mutate(earnings_identifier = ifelse(is.na(earnings_identifier),lead(earnings_identifier, 2),earnings_identifier)) %>%
+  rename(earnings_date = qtr, qtr = earnings_identifier) %>%
+  ungroup()
+earningsPricesOnly$qtr <- as.yearmon(earningsPricesOnly$qtr)
+earningsPricesOnly <- merge.data.table(data.table(earningsPricesOnly), earningsClean[, date := NULL], by = c("symbol", "qtr"), all.x = TRUE)
+
+earningsPricesOnly <- earningsPricesOnly %>%
+  group_by(symbol, qtr) %>%
+  mutate(price_rise = ifelse(last(close_adjusted) > first(close_adjusted), TRUE, FALSE),
+         id = row_number(),
+         percentage_to_earnings_date = (close_adjusted - close_adjusted[3])/close_adjusted[3])
+```
+
+```{r charting_performance_around_earnings}
+earningsPricesOnly %>%
+  filter(symbol == "AAPL") %>%
+  ggplot(aes(date, close_adjusted, col = price_rise, group = as.factor(qtr))) +
+  geom_line(size = 1.3) #+
+ # theme(legend.position = "none")
+earningsPricesOnly %>%
+  filter(symbol == "FB") %>%
+  ggplot(aes(id, percentage_to_earnings_date)) +
+  geom_line(aes(col = eps_beat,  group = qtr), alpha = 0.8, linetype = "dashed") +
+  stat_summary(aes(col = eps_beat), fun = mean, geom = "line",size = 1.2) +
+  stat_summary(fun = mean, geom = "line", colour = "black", size = 1.2)
+
+earningsPricesOnly %>%
+  ggplot(aes(id, percentage_to_earnings_date, group = interaction(symbol,qtr))) +
+  geom_point(aes(col = eps_beat)) +
+  geom_line(aes(col = eps_beat))
+
+earningsPricesOnly %>%
+  filter(year(qtr) < 2017) %>%
+  ggplot(aes(id, percentage_to_earnings_date)) +
+  geom_line(aes(col = eps_beat, group = interaction(symbol, qtr)), alpha = 0.4, linetype = "dashed") +
+  facet_grid(~floor_date(date, unit = "year")) +
+  stat_summary(aes(col = eps_beat), fun = mean, geom = "line",size = 1.2) +
+  stat_summary(fun = mean, geom = "line", colour = "black", size = 1.2) +
+  coord_cartesian(ylim = c(-0.05,0.05)) +
+  theme(legend.position = "none")
+
+#performance around earnings by GICS Sector (also, number of unique earnings calls that led to this data)
+earningsPricesOnly %>%
+  ggplot(aes(id, percentage_to_earnings_date)) +
+  stat_summary(aes(col = eps_beat),fun = mean, geom = "line") +
+  stat_summary(fun = mean, geom = "line") +
+  facet_grid(~`GICS Sector`) +
+  theme(legend.position = "none")
+earningsPricesOnly %>%
+  group_by(`GICS Sector`) %>%
+  summarise(number_of_events = n_distinct(interaction(qtr, symbol)), number_of_companies = n_distinct(symbol))
+#performance around earnings by GICS Sector (with yearly performance in the background)
+earningsPricesOnly %>%
+  ggplot(aes(id, percentage_to_earnings_date)) +
+  stat_summary(aes(col = eps_beat, group = interaction(year(qtr), eps_beat)),fun = mean, geom = "line", linetype = "dashed", alpha = 0.4) +
+  stat_summary(aes(col = eps_beat),fun = mean, geom = "line") +
+  facet_grid(~`GICS Sector`) +
+  theme(legend.position = "none")
+
+#performance around earnings by year (also, number of unique earnings calls that led to this data)
+earningsPricesOnly %>%
+  ggplot(aes(id, percentage_to_earnings_date)) + 
+  stat_summary(aes(col = eps_beat), fun = mean, geom = "line") + 
+  facet_grid(~year(qtr)) +
+  theme(legend.position = "none")
+earningsPricesOnly %>%
+  group_by(year(qtr)) %>%
+  summarise(number_of_events = n_distinct(interaction(qtr, symbol)), number_of_companies = n_distinct(symbol))
+```
+
+
+
+
