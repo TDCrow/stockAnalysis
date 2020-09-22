@@ -1,7 +1,7 @@
 # stockAnalysis
 Analysis of S&P500 stocks to examine price movements around earnings calls (from two days before the announcement, to two days after the annoucement), to understand the relationship between EPS, EPS estimates, and share prices.
 
-##Data
+## Data
 The earnings data was sourced from kaggle (https://www.kaggle.com/tsaustin/us-historical-stock-prices-with-earnings-data). This data is scraped from different data sources, and contains 20 years of historical US stock  prices and earnings information from AMEX, Nasdaq, and NYSE markets. The underlying sources for the data are:
 * Nasdaq
 * Yahoo Finance
